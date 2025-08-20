@@ -33,6 +33,7 @@ class ModelWarmer:
         self.ref_image_transform = None
         self.device = None
         self.args = None
+        self.distributed_initialized = False
         
     def warm_models(self, checkpoint_path: Path, device: torch.device, cpu_offload: bool = False, 
                     use_fp8: bool = False, seed: int = 250160):
@@ -51,6 +52,7 @@ class ModelWarmer:
         # Import here to avoid circular imports
         from hymm_sp.sample_inference import HunyuanVideoSampler
         from hymm_sp.config import parse_args
+        from hymm_sp.modules.parallel_states import initialize_distributed
         
         self.device = device
         
@@ -80,6 +82,12 @@ class ModelWarmer:
         sys.argv = ["warm.py"] + cmd_args
         self.args = parse_args()
         sys.argv = original_argv  # Restore original argv
+        
+        # Initialize distributed environment (required by the model)
+        if not self.distributed_initialized:
+            logger.info("Initializing distributed environment for single GPU...")
+            initialize_distributed(self.args.seed)
+            self.distributed_initialized = True
         
         # Load the video sampler following sample_batch.py pattern
         logger.info(f"📥 Loading model from checkpoint: {checkpoint_path}")
