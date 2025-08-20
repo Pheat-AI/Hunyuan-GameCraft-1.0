@@ -1,11 +1,28 @@
 """
 Warm function for pre-loading models into GPU memory.
-This gets called during app setup to initialize models once per container.
+Following the pattern from sample_batch.py
 """
 
+import os
 import torch
 from pathlib import Path
 import torchvision.transforms as transforms
+from loguru import logger
+
+
+class CropResize:
+    """Custom transform to resize and crop images to a target size while preserving aspect ratio."""
+    def __init__(self, size=(704, 1216)):
+        self.target_h, self.target_w = size  
+
+    def __call__(self, img):
+        w, h = img.size
+        scale = max(self.target_w / w, self.target_h / h)
+        new_size = (int(h * scale), int(w * scale))
+        resize_transform = transforms.Resize(new_size, interpolation=transforms.InterpolationMode.BILINEAR)
+        resized_img = resize_transform(img)
+        crop_transform = transforms.CenterCrop((self.target_h, self.target_w))
+        return crop_transform(resized_img)
 
 
 class ModelWarmer:
@@ -15,9 +32,10 @@ class ModelWarmer:
         self.hunyuan_video_sampler = None
         self.ref_image_transform = None
         self.device = None
-        self.sampler_args = None
+        self.args = None
         
-    def warm_models(self, checkpoint_path: Path, device: torch.device, cpu_offload: bool = False):
+    def warm_models(self, checkpoint_path: Path, device: torch.device, cpu_offload: bool = False, 
+                    use_fp8: bool = False, seed: int = 250160):
         """
         Load and warm up all models into GPU memory.
         
@@ -25,40 +43,55 @@ class ModelWarmer:
             checkpoint_path: Path to the model checkpoint
             device: CUDA device to load models on
             cpu_offload: Whether to enable CPU offloading for memory efficiency
+            use_fp8: Whether to use FP8 precision
+            seed: Random seed for reproducibility
         """
-        print("🔥 Warming up models...")
+        logger.info("🔥 Warming up models...")
         
         # Import here to avoid circular imports
         from hymm_sp.sample_inference import HunyuanVideoSampler
-        from diffusers.hooks import apply_group_offloading
         
         self.device = device
         
-        # Create minimal args object for the sampler
+        # Create args object similar to sample_batch.py with ALL required attributes
         class Args:
             def __init__(self):
+                self.ckpt = str(checkpoint_path)
                 self.cpu_offload = cpu_offload
-                self.use_fp8 = False
-                self.seed = 250160
+                self.use_fp8 = use_fp8
+                self.seed = seed
+                # Add the missing precision attribute
+                self.precision = "fp16"  # Default precision
+                # Other defaults from sample_batch.py
                 self.rope_theta = 1000000
-                self.vae = "hyvae"  # Set default VAE type
+                self.vae = "hyvae"
+                self.use_deepcache = True
+                self.use_linear_quadratic_schedule = False
+                self.linear_schedule_end = 0.1
+                self.flow_shift_eval_video = 5.0
+                self.use_sage = False
+                # Additional args that might be needed
+                self.text_encoder_name = "llama"
+                self.text_encoder_name_2 = "clipL"
+                self.model_extra_args = {}
                 
-        args = Args()
+        self.args = Args()
         
-        # Load the video sampler - this is the expensive operation we want to do once
-        print("📥 Loading HunyuanVideoSampler...")
+        # Load the video sampler following sample_batch.py pattern
+        logger.info(f"📥 Loading model from checkpoint: {checkpoint_path}")
         self.hunyuan_video_sampler = HunyuanVideoSampler.from_pretrained(
             str(checkpoint_path), 
-            args=args, 
-            device=torch.device("cpu") if args.cpu_offload else device
+            args=self.args, 
+            device=device if not cpu_offload else torch.device("cpu")
         )
         
-        # Store the args for later use
-        self.sampler_args = self.hunyuan_video_sampler.args
+        # Update args with model-specific configurations from the checkpoint
+        self.args = self.hunyuan_video_sampler.args
         
-        # Enable CPU offloading for memory efficiency if requested
-        if args.cpu_offload:
-            print("🔄 Setting up CPU offloading...")
+        # Enable CPU offloading if specified
+        if cpu_offload:
+            logger.info("🔄 Setting up CPU offloading...")
+            from diffusers.hooks import apply_group_offloading
             onload_device = torch.device("cuda")
             apply_group_offloading(
                 self.hunyuan_video_sampler.pipeline.transformer, 
@@ -66,17 +99,18 @@ class ModelWarmer:
                 offload_type="block_level", 
                 num_blocks_per_group=1
             )
-            print("✅ Enabled CPU offloading for transformer blocks")
+            logger.info("✅ Enabled CPU offloading for transformer blocks")
         
-        # Set up image preprocessing transforms (reused for each generation)
+        # Set up image preprocessing transforms (matching sample_batch.py)
+        closest_size = (704, 1216)
         self.ref_image_transform = transforms.Compose([
-            self._CropResize((704, 1216)),
-            transforms.CenterCrop((704, 1216)),
+            CropResize(closest_size),
+            transforms.CenterCrop(closest_size),
             transforms.ToTensor(), 
             transforms.Normalize([0.5], [0.5])  # Normalize to [-1, 1] range
         ])
         
-        print("✅ Model warming complete! Ready for inference.")
+        logger.info("✅ Model warming complete! Ready for inference.")
         
     def get_sampler(self):
         """Get the pre-loaded video sampler"""
@@ -94,23 +128,9 @@ class ModelWarmer:
         """Get the device models are loaded on"""
         return self.device
     
-    def get_sampler_args(self):
-        """Get the sampler arguments"""
-        return self.sampler_args
-    
-    class _CropResize:
-        """Custom transform to resize and crop images to a target size while preserving aspect ratio."""
-        def __init__(self, size=(704, 1216)):
-            self.target_h, self.target_w = size  
-
-        def __call__(self, img):
-            w, h = img.size
-            scale = max(self.target_w / w, self.target_h / h)
-            new_size = (int(h * scale), int(w * scale))
-            resize_transform = transforms.Resize(new_size, interpolation=transforms.InterpolationMode.BILINEAR)
-            resized_img = resize_transform(img)
-            crop_transform = transforms.CenterCrop((self.target_h, self.target_w))
-            return crop_transform(resized_img)
+    def get_args(self):
+        """Get the args object with model configurations"""
+        return self.args
 
 
 # Global instance to be used across the app
