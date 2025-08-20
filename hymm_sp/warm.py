@@ -50,46 +50,50 @@ class ModelWarmer:
         
         # Import here to avoid circular imports
         from hymm_sp.sample_inference import HunyuanVideoSampler
+        from hymm_sp.config import parse_args
         
         self.device = device
         
-        # Create args object similar to sample_batch.py with ALL required attributes
-        class Args:
-            def __init__(self):
-                self.ckpt = str(checkpoint_path)
-                self.cpu_offload = cpu_offload
-                self.use_fp8 = use_fp8
-                self.seed = seed
-                # Add the missing precision attribute
-                self.precision = "fp16"  # Default precision
-                # Other defaults from sample_batch.py
-                self.rope_theta = 1000000
-                self.vae = "hyvae"
-                self.use_deepcache = True
-                self.use_linear_quadratic_schedule = False
-                self.linear_schedule_end = 0.1
-                self.flow_shift_eval_video = 5.0
-                self.use_sage = False
-                # Additional args that might be needed
-                self.text_encoder_name = "llama"
-                self.text_encoder_name_2 = "clipL"
-                self.model_extra_args = {}
-                
-        self.args = Args()
+        # Use the actual parse_args to get all required attributes
+        # Create a minimal command line args list
+        cmd_args = [
+            "--ckpt", str(checkpoint_path),
+            "--seed", str(seed),
+            "--video-size", "704", "1216",
+            "--infer-steps", "8",  # Use minimal steps for warming
+            "--cfg-scale", "1.0",
+            "--image-start",
+            "--action-list", "w",  # Minimal action
+            "--action-speed-list", "0.2",
+            "--sample-n-frames", "1",  # Minimal frames
+            "--save-path", "/tmp/warm_results",
+        ]
+        
+        if cpu_offload:
+            cmd_args.append("--cpu-offload")
+        if use_fp8:
+            cmd_args.append("--use-fp8")
+        
+        # Parse args like sample_batch.py does
+        import sys
+        original_argv = sys.argv
+        sys.argv = ["warm.py"] + cmd_args
+        self.args = parse_args()
+        sys.argv = original_argv  # Restore original argv
         
         # Load the video sampler following sample_batch.py pattern
         logger.info(f"📥 Loading model from checkpoint: {checkpoint_path}")
         self.hunyuan_video_sampler = HunyuanVideoSampler.from_pretrained(
-            str(checkpoint_path), 
+            self.args.ckpt, 
             args=self.args, 
-            device=device if not cpu_offload else torch.device("cpu")
+            device=device if not self.args.cpu_offload else torch.device("cpu")
         )
         
         # Update args with model-specific configurations from the checkpoint
         self.args = self.hunyuan_video_sampler.args
         
         # Enable CPU offloading if specified
-        if cpu_offload:
+        if self.args.cpu_offload:
             logger.info("🔄 Setting up CPU offloading...")
             from diffusers.hooks import apply_group_offloading
             onload_device = torch.device("cuda")
