@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from hymm_sp.sample_inference import HunyuanVideoSampler
 from hymm_sp.config import parse_args
-from hymm_sp.modules.parallel_states import initialize_distributed, get_rank
+from hymm_sp.modules.parallel_states import initialize_distributed
 
 
 def warm_multi_gpu():
@@ -46,7 +46,7 @@ def warm_multi_gpu():
     # Initialize distributed - this expects MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE from torchrun
     initialize_distributed(args.seed)
     
-    rank = get_rank()
+    rank = dist.get_rank()
     world_size = dist.get_world_size()
     
     logger.info(f"🔥 Warming GPU {rank}/{world_size-1}")
